@@ -20,6 +20,12 @@ fs.mkdirSync(RESUMES_DIR, { recursive: true });
 
 const app = express();
 
+// Railway (and most PaaS hosts) terminate TLS at their edge and forward
+// plain HTTP internally, adding X-Forwarded-*. Without this, Express can't
+// correctly tell the request was actually HTTPS, which breaks secure-cookie
+// handling for the session.
+app.set('trust proxy', 1);
+
 // Same-origin in production (server serves the built client), so this mainly
 // matters for local dev where the Vite server runs on a different port.
 app.use(cors({
