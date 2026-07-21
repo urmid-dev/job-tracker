@@ -2,7 +2,13 @@ import Groq from 'groq-sdk';
 import fs from 'fs';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Constructed lazily (on first actual use, not at import time) so a missing
+// GROQ_API_KEY only breaks scoring calls, not the entire server process.
+let _groq;
+function groq() {
+  if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
 
 // Each uploaded resume version lives at its own immutable path, so cached
 // text for one version is never invalidated by uploading another.
@@ -21,7 +27,7 @@ async function matchWordCount(bullet, targetWords) {
     ? `It currently has ${currentWords} words. Add exactly ${diff} more word(s) (e.g. a natural qualifier or detail) so the total is EXACTLY ${targetWords} words.`
     : `It currently has ${currentWords} words. Remove exactly ${-diff} word(s) (e.g. a filler word) so the total is EXACTLY ${targetWords} words.`;
 
-  const response = await groq.chat.completions.create({
+  const response = await groq().chat.completions.create({
     model: 'llama-3.3-70b-versatile',
     messages: [
       {
@@ -97,7 +103,7 @@ export async function scoreJob(jd, resumePath) {
   const resume = await getResumeText(resumePath);
   console.log('Resume text extracted, length:', resume.length);
 
-  const response = await groq.chat.completions.create({
+  const response = await groq().chat.completions.create({
     model: 'llama-3.3-70b-versatile',
     messages: [
       {
