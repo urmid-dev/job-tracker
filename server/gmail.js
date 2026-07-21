@@ -9,7 +9,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_PATH = process.env.GMAIL_TOKEN_PATH || path.join(__dirname, 'gmail_token.json');
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Constructed lazily (on first actual use, not at import time) so a missing
+// GROQ_API_KEY only breaks classification calls, not the entire server process.
+let _groq;
+function groq() {
+  if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
 
 // Guards against an overlapping cron + manual sync running at the same time.
 let syncInProgress = false;
@@ -125,7 +131,7 @@ export function matchesCompany(company, from, subject, snippet) {
 }
 
 async function classifyEmail(job, email) {
-  const response = await groq.chat.completions.create({
+  const response = await groq().chat.completions.create({
     model: 'llama-3.3-70b-versatile',
     messages: [
       {
