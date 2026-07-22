@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
+import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import fs from 'fs';
 import path from 'path';
@@ -58,6 +59,20 @@ function requireOwner(req, res, next) {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
   if (!req.session.isOwner) return res.status(403).json({ error: 'Owner access required' });
   next();
+}
+
+// Guards routes that spend real LLM/API cost — keyed per logged-in user
+// (rather than per IP) so one account can't be starved by another sharing a
+// network, and one account can't rack up unlimited Groq/Gmail API usage.
+function llmRateLimit(max) {
+  return rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => (req.session?.userId ? `user:${req.session.userId}` : req.ip),
+    message: { error: 'Too many requests — please wait a few minutes and try again.' },
+  });
 }
 
 app.post('/api/auth/signup', (req, res) => {
@@ -308,7 +323,7 @@ app.post('/api/gmail/disconnect', requireOwner, async (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/gmail/sync-now', requireOwner, async (req, res) => {
+app.post('/api/gmail/sync-now', requireOwner, llmRateLimit(10), async (req, res) => {
   try {
     const summary = await runSync({ trigger: 'manual' });
     if (summary.skipped) return res.status(409).json({ error: 'Sync already in progress' });
@@ -369,7 +384,7 @@ app.get('/api/jobs', requireAuth, (req, res) => {
 });
 
 // Add a new job + score it
-app.post('/api/jobs', requireAuth, async (req, res) => {
+app.post('/api/jobs', requireAuth, llmRateLimit(20), async (req, res) => {
   const { company, role, jd, resume_id, applied_date } = req.body;
 
   if (!company || !role) {
