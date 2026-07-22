@@ -23,6 +23,51 @@ optional Gmail auto-sync.
 - **Multi-user accounts** — anyone can sign up (email + password); each
   account only ever sees its own jobs and resumes.
 
+## AI guardrails & evals
+
+Two LLM call sites: resume/JD scoring (`server/groq.js`) and Gmail email
+classification (`server/gmail.js`), both via Groq/Llama.
+
+**Guardrails:**
+- **Output schema validation** (`server/schemas.js`, [zod](https://zod.dev/))
+  — every model response is validated against a strict schema (exact enum
+  values, correct types) before the app uses it. Without this, a drifted or
+  malformed response (e.g. wrong casing on a classification) could have been
+  written straight into the database.
+- **Prompt-injection framing** — resume text, job descriptions, and email
+  bodies are wrapped in explicit delimiters with an instruction telling the
+  model to treat that content strictly as data, never as instructions.
+- **Confidence-gated human-in-the-loop** — Gmail only *auto-applies* a
+  status change on a high-confidence classification; low-confidence matches
+  become a pending suggestion the owner has to manually accept or dismiss.
+- **Pre-filtering before the LLM runs** — incoming emails are matched
+  against tracked companies first, so the classifier only ever runs on
+  plausibly-relevant messages.
+- **Deterministic correction of LLM output** — rewritten resume bullets are
+  verified to match the original's word count; if the model misses after a
+  few retries, a non-AI fallback forcibly corrects it rather than shipping
+  a wrong count.
+- **Per-user rate limiting** ([express-rate-limit](https://express-rate-limit.mintlify.app/))
+  on both LLM-cost routes, so no single account can run up unlimited API
+  usage.
+- **Graceful degradation** — if scoring fails for any reason, the job is
+  still created without a score instead of the whole request failing.
+
+**Evals** (`server/evals/run.js`, run manually via `npm run eval` in
+`server/` — calls the real Groq API against a small fixed set of resume/JD
+and email examples, so it costs a little real usage and isn't part of the
+automatic test suite):
+- Resume scoring: a strong-match JD scores high, a clearly unrelated JD
+  scores low, and a minimal JD doesn't crash — all checked against the zod
+  schema.
+- Email classification: an explicit rejection and an explicit interview
+  invite are classified correctly with high confidence; a generic
+  "we received your application" acknowledgment and an unrelated newsletter
+  are correctly recognized as non-decisions.
+
+Schema-validation guardrails are also covered by free, mocked, automatic
+unit tests in `server/test/guardrails.unit.test.js` (part of `npm test`).
+
 ## Tech stack
 
 - **Client**: React 19 + Vite + Tailwind CSS
