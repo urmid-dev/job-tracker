@@ -15,7 +15,7 @@ optional Gmail auto-sync.
   visa-sponsorship signal, plus a highlighted PDF viewer showing exactly
   which resume phrases the rewrites reference.
 - **Gmail auto-sync** *(owner-only)* — once a day, scans the inbox for
-  rejection/interview emails and automatically updates the matching job's
+  rejection/interview/offer emails and automatically updates the matching job's
   status. This is a single-owner feature, not per-user: hooking every user's
   own Gmail up would require Google's OAuth app-verification review for a
   restricted scope (`gmail.readonly`), which isn't practical for a small

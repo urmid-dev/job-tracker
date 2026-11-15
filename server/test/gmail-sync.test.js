@@ -239,6 +239,6 @@ describe('when Gmail is connected', () => {
     await agent.post('/api/gmail/sync-now');
 
     const query = mockGmailClient.users.messages.list.mock.calls[0][0].q;
-    expect(query).toBe('newer_than:2d');
+    expect(query).toBe('newer_than:2d ("eta")');
   });
 });

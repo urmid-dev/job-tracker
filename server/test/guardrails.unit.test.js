@@ -97,3 +97,9 @@ describe('classificationResultSchema', () => {
     expect(() => classificationResultSchema.parse(withoutReason)).toThrow();
   });
 });
+
+describe('classificationResultSchema offers', () => {
+  it('accepts an offer classification', () => {
+    expect(() => classificationResultSchema.parse({ classification: 'offer', confidence: 'high', reason: 'x' })).not.toThrow();
+  });
+});
