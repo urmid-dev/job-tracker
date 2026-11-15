@@ -24,6 +24,7 @@ describe('POST /api/jobs', () => {
     expect(res.status).toBe(200);
     expect(res.body.fit_score).toBeNull();
     expect(res.body.jd).toBe('some job description');
+    expect(res.body.scoring_error).toMatch(/no resume/i);
   });
 
   it('rejects a request missing company or role', async () => {

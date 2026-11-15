@@ -11,6 +11,7 @@ import db from './db.js';
 import multer from 'multer';
 import cron from 'node-cron';
 import { scoreJob, getResumeText } from './groq.js';
+import { describeLlmError } from './llm.js';
 import { parseJobUrl } from './scraper.js';
 import { buildHighlightedPdf } from './highlight.js';
 import { isConnected, getConnectedEmail, getLastSync, getAuthUrl, handleOAuthCallback, runSync, disconnect } from './gmail.js';
@@ -392,9 +393,12 @@ app.post('/api/jobs', requireAuth, llmRateLimit(20), async (req, res) => {
   }
 
   let score = null, verdict = null, missing_keywords = [], ats_issues = [], resume_tips = [], top_recommendations = [], sponsors = null;
+  // Not stored: returned once so the client can say why there's no score.
+  let scoring_error = null;
   const resume = jd ? getResumeRow(resume_id, req.session.userId) : null;
 
   if (jd && !resume) {
+    scoring_error = 'No resume uploaded, so the job was added without a match score.';
     console.error('Scoring skipped: no resume available (upload one, or pick a version)');
   } else if (jd) {
     console.log(`JD received, scoring against resume "${resume.original_name}" (id ${resume.id})...`);
@@ -410,6 +414,7 @@ app.post('/api/jobs', requireAuth, llmRateLimit(20), async (req, res) => {
       top_recommendations = result.top_recommendations || [];
       sponsors = result.sponsors ?? null;
     } catch (e) {
+      scoring_error = describeLlmError(e);
       console.error('Scoring failed:', e.message);
       console.error(e.stack);
     }
@@ -438,7 +443,7 @@ app.post('/api/jobs', requireAuth, llmRateLimit(20), async (req, res) => {
 
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(info.lastInsertRowid);
   recordStatusChange(job.id, job.status, 'system');
-  res.json(deserializeJob(job));
+  res.json(scoring_error ? { ...deserializeJob(job), scoring_error } : deserializeJob(job));
 });
 
 // Fetches a job only if it belongs to the requesting user — every route

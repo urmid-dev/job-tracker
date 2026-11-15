@@ -245,6 +245,12 @@ export default function CoachPanel({ job, onClose, onDelete, onStatusChange }) {
                 </Section>
               )}
             </>
+          ) : job.scoring_error ? (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+              ATS review unavailable: {job.scoring_error}
+            </div>
+          ) : job.jd ? (
+            <div className="text-xs text-gray-400">ATS review unavailable — scoring didn't complete for this job.</div>
           ) : (
             <div className="text-xs text-gray-400">No JD added — ATS review unavailable.</div>
           )}
