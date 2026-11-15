@@ -137,4 +137,85 @@ describe('offer detection and targeted Gmail search', () => {
     expect(query).toContain('"acme corp"');
     expect(query).toContain('"acme"');
   });
+
+  it('skips job-alert emails without spending an AI call', async () => {
+    await agent.post('/api/jobs').send({ company: 'BNY', role: 'PM', applied_date: '2026-01-01' });
+
+    mockGmailClient.users.messages.list.mockResolvedValueOnce({ data: { messages: [{ id: 'alert1' }] } });
+    mockGmailClient.users.messages.get.mockResolvedValue(fakeGmailMessage({
+      from: 'LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>',
+      subject: '"product manager": BNY - Senior Associate and more',
+      snippet: 'BNY is hiring. See 12 new jobs.',
+      internalDate: Date.parse('2026-02-01'),
+    }));
+
+    const sync = await agent.post('/api/gmail/sync-now');
+    expect(sync.body.summary.skippedBulk).toBe(1);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('caps AI checks per sync and leaves the rest for the next run', async () => {
+    await agent.post('/api/jobs').send({ company: 'Capco', role: 'PM', applied_date: '2026-01-01' });
+    const ids = Array.from({ length: 35 }, (_, i) => ({ id: `cap${i}` }));
+
+    mockGmailClient.users.messages.list.mockResolvedValue({ data: { messages: ids } });
+    mockGmailClient.users.messages.get.mockResolvedValue(fakeGmailMessage({
+      from: 'hr@capco.com', subject: 'Capco update', snippet: 'Thanks for applying to Capco', internalDate: Date.parse('2026-02-01'),
+    }));
+    mockCreate.mockResolvedValue(classification('other', 'high'));
+
+    const first = await agent.post('/api/gmail/sync-now');
+    expect(mockCreate).toHaveBeenCalledTimes(30);
+    expect(first.body.summary.remaining).toBe(5);
+
+    mockCreate.mockClear();
+    const second = await agent.post('/api/gmail/sync-now');
+    expect(mockCreate).toHaveBeenCalledTimes(5);
+    expect(second.body.summary.remaining).toBe(0);
+  });
+
+  it('does not let an older email undo a newer status (offer then old interview invite)', async () => {
+    const created = await agent.post('/api/jobs').send({ company: 'BNY', role: 'PM', applied_date: '2026-01-01' });
+    const jobId = created.body.id;
+    const emails = {
+      newOffer: { from: 'bny@myworkday.com', subject: 'Your offer from BNY', snippet: 'pleased to extend an offer', internalDate: Date.parse('2026-02-10') },
+      oldInterview: { from: 'bny@myworkday.com', subject: 'BNY interview', snippet: 'schedule your interview', internalDate: Date.parse('2026-01-20') },
+    };
+    // Gmail lists newest first.
+    mockGmailClient.users.messages.list.mockResolvedValueOnce({ data: { messages: [{ id: 'newOffer' }, { id: 'oldInterview' }] } });
+    mockGmailClient.users.messages.get.mockImplementation(async ({ id }) => fakeGmailMessage(emails[id]));
+    mockCreate
+      .mockResolvedValueOnce(classification('offer', 'high'))
+      .mockResolvedValueOnce(classification('interview', 'high'));
+
+    await agent.post('/api/gmail/sync-now');
+    const jobs = await agent.get('/api/jobs');
+    expect(jobs.body.find(j => j.id === jobId).status).toBe('offer');
+    const superseded = db.prepare("SELECT classification FROM gmail_suggestions WHERE status = 'superseded'").all();
+    expect(superseded).toEqual([{ classification: 'interview' }]);
+  });
+
+  it('stops on an AI rate limit and retries the unchecked emails next sync', async () => {
+    await agent.post('/api/jobs').send({ company: 'Ratel', role: 'PM', applied_date: '2026-01-01' });
+
+    mockGmailClient.users.messages.list.mockResolvedValue({ data: { messages: [{ id: 'r1' }, { id: 'r2' }] } });
+    mockGmailClient.users.messages.get.mockResolvedValue(fakeGmailMessage({
+      from: 'hr@ratel.com', subject: 'Ratel application', snippet: 'Ratel update', internalDate: Date.parse('2026-02-01'),
+    }));
+    mockCreate.mockRejectedValueOnce(Object.assign(new Error('Rate limit reached'), { status: 429 }));
+
+    const first = await agent.post('/api/gmail/sync-now');
+    expect(first.body.summary.errors).toContain('rate_limited');
+    expect(first.body.summary.remaining).toBe(2);
+
+    mockCreate.mockResolvedValue(classification('other', 'high'));
+    const second = await agent.post('/api/gmail/sync-now');
+    expect(mockCreate).toHaveBeenCalledTimes(3); // 1 failed + 2 retried
+    expect(second.body.summary.remaining).toBe(0);
+  });
+
+  it('reports no progress when idle', async () => {
+    const res = await agent.get('/api/gmail/status');
+    expect(res.body.syncProgress).toBeNull();
+  });
 });

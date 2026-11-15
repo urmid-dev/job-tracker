@@ -14,7 +14,7 @@ import { scoreJob, getResumeText } from './groq.js';
 import { describeLlmError } from './llm.js';
 import { parseJobUrl } from './scraper.js';
 import { buildHighlightedPdf } from './highlight.js';
-import { isConnected, getConnectedEmail, getLastSync, getAuthUrl, handleOAuthCallback, runSync, disconnect } from './gmail.js';
+import { isConnected, getConnectedEmail, getLastSync, getAuthUrl, handleOAuthCallback, runSync, disconnect, getSyncProgress } from './gmail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RESUMES_DIR = process.env.RESUMES_DIR || path.join(__dirname, 'resumes');
@@ -316,6 +316,8 @@ app.get('/api/gmail/status', requireOwner, (req, res) => {
     lastSyncSummary,
     pendingSuggestions,
     needsReconnect,
+    // Non-null while a sync is running, so the UI can show live progress.
+    syncProgress: getSyncProgress(),
   });
 });
 
@@ -327,7 +329,7 @@ app.post('/api/gmail/disconnect', requireOwner, async (req, res) => {
 app.post('/api/gmail/sync-now', requireOwner, llmRateLimit(10), async (req, res) => {
   try {
     const summary = await runSync({ trigger: 'manual' });
-    if (summary.skipped) return res.status(409).json({ error: 'Sync already in progress' });
+    if (summary.skipped) return res.status(409).json({ error: 'Sync already in progress', syncProgress: getSyncProgress() });
     res.json({ success: true, summary });
   } catch (e) {
     if (e.message === 'not_connected') return res.status(400).json({ error: 'Gmail not connected. Connect your Gmail account first.' });
