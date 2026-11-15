@@ -1,4 +1,4 @@
-import { normalizeCompanyName, matchesCompany, computeScanDays, extractEmailBody } from '../gmail.js';
+import { normalizeCompanyName, matchesCompany, computeScanDays, extractEmailBody, buildSyncQueries } from '../gmail.js';
 
 describe('normalizeCompanyName', () => {
   it('lowercases and strips common suffixes', () => {
@@ -120,5 +120,28 @@ describe('extractEmailBody', () => {
     const longText = 'a'.repeat(10000);
     const payload = { mimeType: 'text/plain', body: { data: b64url(longText) } };
     expect(extractEmailBody(payload).length).toBeLessThanOrEqual(4000);
+  });
+});
+
+describe('buildSyncQueries', () => {
+  it('searches each company by raw and normalized name', () => {
+    expect(buildSyncQueries([{ company: 'Acme Corp' }, { company: 'BNY' }], 7))
+      .toEqual(['newer_than:7d ("acme corp" OR "acme" OR "bny")']);
+  });
+
+  it('strips characters that would break Gmail search syntax', () => {
+    const [q] = buildSyncQueries([{ company: 'Foo "Bar" (Baz)' }], 3);
+    expect(q).toBe('newer_than:3d ("foo bar baz")');
+  });
+
+  it('splits many companies across several queries', () => {
+    const jobs = Array.from({ length: 20 }, (_, i) => ({ company: `Company${i}` }));
+    const queries = buildSyncQueries(jobs, 2);
+    expect(queries.length).toBe(2);
+    expect(queries.join(' ')).toContain('"company19"');
+  });
+
+  it('returns no queries when no job has a company', () => {
+    expect(buildSyncQueries([{ company: '' }], 2)).toEqual([]);
   });
 });

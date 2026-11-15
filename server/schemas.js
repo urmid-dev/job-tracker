@@ -22,7 +22,9 @@ export const scoreResultSchema = z.object({
 
 // Mirrors the exact JSON contract requested in gmail.js's classifyEmail prompt.
 export const classificationResultSchema = z.object({
-  classification: z.enum(['rejected', 'interview', 'other']),
+  // Values double as job statuses: a high-confidence result is written
+  // straight into jobs.status.
+  classification: z.enum(['rejected', 'interview', 'offer', 'other']),
   confidence: z.enum(['high', 'low']),
   reason: z.string(),
 });

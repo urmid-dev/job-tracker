@@ -103,6 +103,16 @@ async function main() {
     assert(result.confidence === 'high', `expected 'high' confidence, got '${result.confidence}'`);
   });
 
+  await check('explicit offer (that also mentions a call) classifies as offer/high', async () => {
+    const result = await classifyEmail(job, {
+      from: 'recruiting@acmecorp.com',
+      subject: 'Your offer from Acme Corp',
+      body: "Congratulations! We are pleased to extend you an offer for the position. Your recruiter will set up a quick call to walk through the offer letter and start date.",
+    });
+    assert(result.classification === 'offer', `expected 'offer', got '${result.classification}'`);
+    assert(result.confidence === 'high', `expected 'high' confidence, got '${result.confidence}'`);
+  });
+
   await check('generic acknowledgment email does not get misread as a decision', async () => {
     // Confidence only matters for rejected/interview (it gates auto-apply);
     // for a plain "received your application" acknowledgment, the important
