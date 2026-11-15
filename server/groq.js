@@ -1,15 +1,8 @@
-import Groq from 'groq-sdk';
 import fs from 'fs';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { scoreResultSchema } from './schemas.js';
+import { groq, GROQ_MODEL, REASONING_OPTS } from './llm.js';
 
-// Constructed lazily (on first actual use, not at import time) so a missing
-// GROQ_API_KEY only breaks scoring calls, not the entire server process.
-let _groq;
-function groq() {
-  if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
 
 // Each uploaded resume version lives at its own immutable path, so cached
 // text for one version is never invalidated by uploading another.
@@ -29,7 +22,7 @@ async function matchWordCount(bullet, targetWords) {
     : `It currently has ${currentWords} words. Remove exactly ${-diff} word(s) (e.g. a filler word) so the total is EXACTLY ${targetWords} words.`;
 
   const response = await groq().chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: GROQ_MODEL,
     messages: [
       {
         role: 'system',
@@ -37,11 +30,12 @@ async function matchWordCount(bullet, targetWords) {
       },
       { role: 'user', content: bullet }
     ],
-    max_tokens: 200,
-    temperature: 0.1
+    max_tokens: 1000,
+    temperature: 0.1,
+    ...REASONING_OPTS,
   });
 
-  return response.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+  return (response.choices[0]?.message?.content ?? '').trim().replace(/^["']|["']$/g, '');
 }
 
 // Deterministic last-resort fixup: pad/trim a single filler word so the count
@@ -105,7 +99,7 @@ export async function scoreJob(jd, resumePath) {
   console.log('Resume text extracted, length:', resume.length);
 
   const response = await groq().chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: GROQ_MODEL,
     messages: [
       {
         role: 'system',
@@ -173,11 +167,13 @@ CRITICAL INSTRUCTIONS for bullet_critiques:
         content: `<<<RESUME>>>\n${resume}\n<<<END_RESUME>>>\n\n<<<JOB_DESCRIPTION>>>\n${jd}\n<<<END_JOB_DESCRIPTION>>>`
       }
     ],
-    max_tokens: 3500,
-    temperature: 0.2
+    max_tokens: 12000,
+    temperature: 0.2,
+    response_format: { type: 'json_object' },
+    ...REASONING_OPTS,
   });
 
-  const raw = response.choices[0].message.content.trim();
+  const raw = (response.choices[0]?.message?.content ?? '').trim();
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`No JSON object found in response: ${raw}`);
   const parsed = scoreResultSchema.parse(JSON.parse(match[0]));

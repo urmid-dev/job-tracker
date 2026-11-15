@@ -2,21 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { google } from 'googleapis';
-import Groq from 'groq-sdk';
 import db from './db.js';
 import { classificationResultSchema } from './schemas.js';
+import { groq, GROQ_MODEL, REASONING_OPTS } from './llm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_PATH = process.env.GMAIL_TOKEN_PATH || path.join(__dirname, 'gmail_token.json');
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
 
-// Constructed lazily (on first actual use, not at import time) so a missing
-// GROQ_API_KEY only breaks classification calls, not the entire server process.
-let _groq;
-function groq() {
-  if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
 
 // Guards against an overlapping cron + manual sync running at the same time.
 let syncInProgress = false;
@@ -135,7 +128,7 @@ export async function classifyEmail(job, email) {
   const FALLBACK = { classification: 'other', confidence: 'low', reason: 'Could not parse classification' };
 
   const response = await groq().chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: GROQ_MODEL,
     messages: [
       {
         role: 'system',
@@ -146,11 +139,13 @@ export async function classifyEmail(job, email) {
         content: `JOB: ${job.company} — ${job.role}\n\n<<<EMAIL>>>\nFROM: ${email.from}\nSUBJECT: ${email.subject}\nBODY:\n${email.body || email.snippet}\n<<<END_EMAIL>>>`
       }
     ],
-    max_tokens: 250,
-    temperature: 0.1
+    max_tokens: 2000,
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    ...REASONING_OPTS,
   });
 
-  const raw = response.choices[0].message.content.trim();
+  const raw = (response.choices[0]?.message?.content ?? '').trim();
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return FALLBACK;
   try {

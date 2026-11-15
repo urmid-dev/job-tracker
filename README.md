@@ -10,7 +10,7 @@ optional Gmail auto-sync.
 - **Job board** — track company, role, status (applied / interview /
   rejected / offer), and applied date, with a per-job status timeline.
 - **AI ATS review** — paste a job description and your resume gets scored
-  against it (Groq/Llama): missing keywords, ATS compatibility issues,
+  against it (Groq, `openai/gpt-oss-120b`): missing keywords, ATS compatibility issues,
   bullet-by-bullet rewrite suggestions with keyword/word-count deltas, and a
   visa-sponsorship signal, plus a highlighted PDF viewer showing exactly
   which resume phrases the rewrites reference.
@@ -26,7 +26,7 @@ optional Gmail auto-sync.
 ## AI guardrails & evals
 
 Two LLM call sites: resume/JD scoring (`server/groq.js`) and Gmail email
-classification (`server/gmail.js`), both via Groq/Llama.
+classification (`server/gmail.js`), both via Groq. The model is set in one place (`server/llm.js`) and can be overridden with `GROQ_MODEL`.
 
 **Guardrails:**
 - **Output schema validation** (`server/schemas.js`, [zod](https://zod.dev/))
@@ -89,6 +89,8 @@ Create `server/.env`:
 
 ```
 GROQ_API_KEY=your-groq-api-key
+# Optional — override the Groq model (default: openai/gpt-oss-120b)
+# GROQ_MODEL=openai/gpt-oss-120b
 
 # Optional — only needed if you want Gmail auto-sync
 GOOGLE_CLIENT_ID=your-google-oauth-client-id
