@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import api, { API } from '../api';
 
 function timeAgo(iso) {
@@ -12,6 +12,25 @@ function timeAgo(iso) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+function progressText(p) {
+  if (!p) return '';
+  if (p.phase === 'searching') return 'Searching your inbox for emails from tracked companies…';
+  if (p.phase === 'filtering') return `Looking through ${p.filtered} of ${p.scanned} emails…`;
+  return `Checking ${p.classified} of ${p.toClassify} matching emails with AI…`;
+}
+
+function summaryText(s) {
+  if (!s) return '';
+  const parts = [`${s.scanned} emails found`];
+  if (s.appliedCount) parts.push(`${s.appliedCount} job${s.appliedCount === 1 ? '' : 's'} updated`);
+  if (s.pendingCount) parts.push(`${s.pendingCount} to review`);
+  if (s.skippedBulk) parts.push(`${s.skippedBulk} job alerts skipped`);
+  let text = parts.join(' · ');
+  if (s.remaining) text += ` — ${s.remaining} more to check on the next sync`;
+  if (s.errors?.includes('rate_limited')) text += ' (AI rate limit reached; the rest will be checked next time)';
+  return text;
+}
+
 export default function GmailConnect({ onClose, onChange }) {
   const [status, setStatus] = useState({});
   const [suggestions, setSuggestions] = useState([]);
@@ -20,6 +39,7 @@ export default function GmailConnect({ onClose, onChange }) {
   const [acting, setActing] = useState(null); // suggestion id being accepted/dismissed
   const [error, setError] = useState('');
   const [ownerOnly, setOwnerOnly] = useState(false);
+  const pollRef = useRef(null);
 
   function refresh() {
     return Promise.all([
@@ -33,7 +53,39 @@ export default function GmailConnect({ onClose, onChange }) {
     });
   }
 
-  useEffect(() => { refresh(); }, []);
+  function stopPolling() {
+    clearInterval(pollRef.current);
+    pollRef.current = null;
+  }
+
+  // While a sync runs (possibly started by the daily cron or an earlier
+  // click), poll status for live progress until it finishes.
+  function startPolling() {
+    if (pollRef.current) return;
+    setSyncing(true);
+    pollRef.current = setInterval(async () => {
+      try {
+        const s = await api.get('/gmail/status');
+        setStatus(s.data);
+        if (!s.data.syncProgress) {
+          stopPolling();
+          setSyncing(false);
+          await refresh();
+          onChange?.();
+        }
+      } catch {
+        stopPolling();
+        setSyncing(false);
+      }
+    }, 2000);
+  }
+
+  useEffect(() => {
+    refresh();
+    api.get('/gmail/status').then(s => { if (s.data.syncProgress) startPolling(); }).catch(() => {});
+    return stopPolling;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function connect() {
     const popup = window.open(`${API}/gmail/connect`, 'gmail-oauth', 'width=500,height=650');
@@ -47,16 +99,17 @@ export default function GmailConnect({ onClose, onChange }) {
   }
 
   async function syncNow() {
-    setSyncing(true);
     setError('');
+    startPolling();
     try {
       await api.post('/gmail/sync-now');
-      await refresh();
-      onChange?.();
     } catch (e) {
-      setError(e.response?.data?.error || 'Sync failed. Please try again.');
-    } finally {
-      setSyncing(false);
+      // 409 = a sync is already running; keep showing its progress.
+      if (e.response?.status !== 409) {
+        stopPolling();
+        setSyncing(false);
+        setError(e.response?.data?.error || 'Sync failed. Please try again.');
+      }
     }
   }
 
@@ -103,8 +156,8 @@ export default function GmailConnect({ onClose, onChange }) {
         {ownerOnly ? (
           <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-3">
             <p className="text-xs text-gray-500 leading-relaxed mb-2.5">
-              Gmail sync scans your inbox once a day to auto-detect rejection
-              and interview emails and update the matching job's status for
+              Gmail sync scans your inbox once a day to auto-detect rejection,
+              interview and offer emails and update the matching job's status for
               you, so you don't have to track it manually.
             </p>
             <p className="text-xs text-gray-600 leading-relaxed">
@@ -123,7 +176,7 @@ export default function GmailConnect({ onClose, onChange }) {
             {!status.connected && (
               <>
                 <p className="text-xs text-gray-500 leading-relaxed mb-4">
-                  Connect your Gmail to automatically detect rejection and interview emails for
+                  Connect your Gmail to automatically detect rejection, interview and offer emails for
                   jobs you've applied to, and update their status once a day.
                 </p>
                 <button
@@ -153,6 +206,21 @@ export default function GmailConnect({ onClose, onChange }) {
               <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 mb-4">
                 <div className="text-xs font-medium text-gray-900">Connected as {status.email}</div>
                 <div className="text-[10px] text-gray-500 mt-0.5">Last synced: {timeAgo(status.lastSyncAt)}</div>
+                {status.syncProgress ? (
+                  <div className="mt-2">
+                    <div className="text-[10px] text-teal-700">{progressText(status.syncProgress)}</div>
+                    {status.syncProgress.phase === 'classifying' && status.syncProgress.toClassify > 0 && (
+                      <div className="h-1 bg-gray-200 rounded-full mt-1 overflow-hidden">
+                        <div
+                          className="h-full bg-teal-500 transition-all"
+                          style={{ width: `${Math.round(100 * status.syncProgress.classified / status.syncProgress.toClassify)}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ) : status.lastSyncSummary && (
+                  <div className="text-[10px] text-gray-500 mt-1">{summaryText(status.lastSyncSummary)}</div>
+                )}
                 <div className="flex gap-2 mt-3">
                   <button
                     onClick={syncNow}

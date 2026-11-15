@@ -124,6 +124,10 @@ export function matchesCompany(company, from, subject, snippet) {
   return haystack.includes(normalizedCompany);
 }
 
+// Decisions (offer / rejection / interview) are stated near the top of an
+// email; a shorter excerpt roughly halves the tokens per call.
+const CLASSIFY_BODY_CHARS = 1500;
+
 export async function classifyEmail(job, email) {
   const FALLBACK = { classification: 'other', confidence: 'low', reason: 'Could not parse classification' };
 
@@ -143,10 +147,10 @@ Return ONLY a raw JSON object, no markdown, no explanation outside the JSON: { "
       },
       {
         role: 'user',
-        content: `JOB: ${job.company} — ${job.role}\n\n<<<EMAIL>>>\nFROM: ${email.from}\nSUBJECT: ${email.subject}\nBODY:\n${email.body || email.snippet}\n<<<END_EMAIL>>>`
+        content: `JOB: ${job.company} — ${job.role}\n\n<<<EMAIL>>>\nFROM: ${email.from}\nSUBJECT: ${email.subject}\nBODY:\n${(email.body || email.snippet || '').slice(0, CLASSIFY_BODY_CHARS)}\n<<<END_EMAIL>>>`
       }
     ],
-    max_tokens: 2000,
+    max_tokens: 1200,
     temperature: 0.1,
     response_format: { type: 'json_object' },
     ...REASONING_OPTS,
@@ -259,8 +263,41 @@ export function buildSyncQueries(jobs, scanDays) {
   return queries;
 }
 
+// Bulk mail (job alerts, newsletters) often names tracked companies but never
+// carries a decision. Filtering it out before the LLM is the biggest saving:
+// Groq's per-minute token limit is what makes a big sync slow.
+const BULK_SENDER = /(^|<|\s)(job-?alerts?(-noreply)?|newsletters?|digest|marketing|events?|promotions?)@/i;
+const BULK_SUBJECT = /\b(job alerts?|jobs? for you|new jobs?|recommended jobs?|jobs? you may be interested in|top job picks|similar jobs|(is|are) hiring|hiring now|newsletter|webinar|digest|weekly roundup|new opportunities)\b/i;
+
+export function isBulkEmail(from, subject) {
+  return BULK_SENDER.test(from || '') || BULK_SUBJECT.test(subject || '');
+}
+
+// Caps LLM calls per run so one sync can't tie up the Groq quota for long.
+// Leftover matches stay unprocessed and are picked up by the next sync.
+export const MAX_CLASSIFY_PER_SYNC = 30;
+
+// Live progress for the UI while a sync runs (null when idle).
+let progress = null;
+export function getSyncProgress() {
+  return syncInProgress ? progress : null;
+}
+
+function isRateLimit(e) {
+  return e?.status === 429 || /rate.?limit/i.test(e?.message || '');
+}
+
+// Emails are classified newest-first, so an older email must not undo a
+// status a newer email already set (e.g. an old interview invite after the
+// offer). Only apply when this email is newer than the job's latest
+// Gmail-sourced status change.
+function isNewerThanLastGmailStatus(jobId, occurredAt) {
+  const last = db.prepare("SELECT created_at FROM job_status_history WHERE job_id = ? AND source = 'gmail' ORDER BY created_at DESC LIMIT 1").get(jobId);
+  return !last || new Date(occurredAt).getTime() >= new Date(last.created_at).getTime();
+}
+
 export async function runSync({ trigger }) {
-  if (syncInProgress) return { skipped: true, reason: 'already running' };
+  if (syncInProgress) return { skipped: true, reason: 'already running', progress };
   if (!isConnected()) {
     if (trigger === 'manual') throw new Error('not_connected');
     console.log('Gmail sync skipped: not connected');
@@ -268,7 +305,8 @@ export async function runSync({ trigger }) {
   }
 
   syncInProgress = true;
-  const summary = { scanned: 0, matched: 0, classified: 0, appliedCount: 0, pendingCount: 0, errors: [] };
+  const summary = { scanned: 0, matched: 0, skippedBulk: 0, classified: 0, appliedCount: 0, pendingCount: 0, remaining: 0, errors: [] };
+  progress = { phase: 'searching', startedAt: new Date().toISOString(), scanned: 0, filtered: 0, toClassify: 0, classified: 0 };
 
   try {
     const gmail = await getAuthorizedClient();
@@ -303,12 +341,16 @@ export async function runSync({ trigger }) {
       }
 
       summary.scanned = messages.length;
+      progress.phase = 'filtering';
+      progress.scanned = messages.length;
       console.log(`Gmail sync: scanning ${messages.length} message(s) from the last ${scanDays} day(s) against ${jobs.length} active job(s)`);
 
+      // Pass 1 — cheap metadata-only fetches to find messages that mention a
+      // tracked company, dropping bulk mail before it costs an LLM call.
+      const candidates = [];
       for (const { id } of messages) {
-        // Cheap metadata-only fetch first, just to pre-filter by company —
-        // avoids pulling full bodies for the many messages that won't match.
         const meta = await gmail.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From', 'Subject'] });
+        progress.filtered++;
         const headers = meta.data.payload.headers;
         const from = getHeader(headers, 'From');
         const subject = getHeader(headers, 'Subject');
@@ -322,40 +364,64 @@ export async function runSync({ trigger }) {
           matchesCompany(job.company, from, subject, snippet) &&
           !db.prepare('SELECT 1 FROM gmail_processed_job_messages WHERE job_id = ? AND gmail_message_id = ?').get(job.id, id)
         );
+        if (!matchedJob) continue;
 
-        if (matchedJob) {
-          summary.matched++;
-
-          // Only fetch the full body for messages that actually matched a
-          // job — this is where "read the whole email" happens, not just the snippet.
-          const full = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
-          const body = extractEmailBody(full.data.payload);
-
-          const result = await classifyEmail(matchedJob, { from, subject, snippet, body });
-          if (result.classification !== 'other') {
-            summary.classified++;
-            const suggestionStatus = result.confidence === 'high' ? 'applied' : 'pending';
-            db.prepare(`
-              INSERT INTO gmail_suggestions (job_id, gmail_message_id, from_email, subject, snippet, received_at, classification, confidence, reason, status)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(matchedJob.id, id, from, subject, snippet, receivedAt, result.classification, result.confidence, result.reason || null, suggestionStatus);
-
-            if (result.confidence === 'high') {
-              // Both created_at (history) and status_updated_at (jobs) are
-              // backdated to when the email actually arrived, not when the
-              // sync happened to run — otherwise a job added long after the
-              // fact shows the rejection as "today".
-              const occurredAt = receivedAt || new Date().toISOString();
-              db.prepare('UPDATE jobs SET status = ?, status_updated_at = ? WHERE id = ?').run(result.classification, occurredAt, matchedJob.id);
-              db.prepare('INSERT INTO job_status_history (job_id, status, source, detail, created_at) VALUES (?, ?, ?, ?, ?)')
-                .run(matchedJob.id, result.classification, 'gmail', subject || result.reason, occurredAt);
-              summary.appliedCount++;
-            } else {
-              summary.pendingCount++;
-            }
-          }
+        summary.matched++;
+        if (isBulkEmail(from, subject)) {
+          summary.skippedBulk++;
           db.prepare('INSERT OR IGNORE INTO gmail_processed_job_messages (job_id, gmail_message_id) VALUES (?, ?)').run(matchedJob.id, id);
+          continue;
         }
+        candidates.push({ id, job: matchedJob, from, subject, snippet, receivedAt });
+      }
+
+      // Pass 2 — full body + LLM classification, newest first, capped per run.
+      const batch = candidates.slice(0, MAX_CLASSIFY_PER_SYNC);
+      summary.remaining = candidates.length - batch.length;
+      progress.phase = 'classifying';
+      progress.toClassify = batch.length;
+
+      for (let i = 0; i < batch.length; i++) {
+        const { id, job, from, subject, snippet, receivedAt } = batch[i];
+        const full = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+        const body = extractEmailBody(full.data.payload);
+
+        let result;
+        try {
+          result = await classifyEmail(job, { from, subject, snippet, body });
+        } catch (e) {
+          // Leave this and the rest unprocessed so the next sync retries them.
+          summary.remaining += batch.length - i;
+          summary.errors.push(isRateLimit(e) ? 'rate_limited' : e.message);
+          console.error('Gmail sync: classification stopped early:', e.message);
+          break;
+        }
+
+        if (result.classification !== 'other') {
+          summary.classified++;
+          const occurredAt = receivedAt || new Date().toISOString();
+          const apply = result.confidence === 'high' && isNewerThanLastGmailStatus(job.id, occurredAt);
+          const suggestionStatus = result.confidence !== 'high' ? 'pending' : (apply ? 'applied' : 'superseded');
+          db.prepare(`
+            INSERT INTO gmail_suggestions (job_id, gmail_message_id, from_email, subject, snippet, received_at, classification, confidence, reason, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(job.id, id, from, subject, snippet, receivedAt, result.classification, result.confidence, result.reason || null, suggestionStatus);
+
+          if (apply) {
+            // Both created_at (history) and status_updated_at (jobs) are
+            // backdated to when the email actually arrived, not when the
+            // sync happened to run — otherwise a job added long after the
+            // fact shows the rejection as "today".
+            db.prepare('UPDATE jobs SET status = ?, status_updated_at = ? WHERE id = ?').run(result.classification, occurredAt, job.id);
+            db.prepare('INSERT INTO job_status_history (job_id, status, source, detail, created_at) VALUES (?, ?, ?, ?, ?)')
+              .run(job.id, result.classification, 'gmail', subject || result.reason, occurredAt);
+            summary.appliedCount++;
+          } else if (result.confidence !== 'high') {
+            summary.pendingCount++;
+          }
+        }
+        db.prepare('INSERT OR IGNORE INTO gmail_processed_job_messages (job_id, gmail_message_id) VALUES (?, ?)').run(job.id, id);
+        progress.classified = i + 1;
       }
     }
 
@@ -372,6 +438,7 @@ export async function runSync({ trigger }) {
     setMeta('last_sync_at', new Date().toISOString());
     setMeta('last_sync_summary', JSON.stringify(summary));
     syncInProgress = false;
+    progress = null;
   }
 
   return summary;

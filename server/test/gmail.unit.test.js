@@ -1,4 +1,4 @@
-import { normalizeCompanyName, matchesCompany, computeScanDays, extractEmailBody, buildSyncQueries } from '../gmail.js';
+import { normalizeCompanyName, matchesCompany, computeScanDays, extractEmailBody, buildSyncQueries, isBulkEmail } from '../gmail.js';
 
 describe('normalizeCompanyName', () => {
   it('lowercases and strips common suffixes', () => {
@@ -143,5 +143,19 @@ describe('buildSyncQueries', () => {
 
   it('returns no queries when no job has a company', () => {
     expect(buildSyncQueries([{ company: '' }], 2)).toEqual([]);
+  });
+});
+
+describe('isBulkEmail', () => {
+  it('flags job alerts and newsletters', () => {
+    expect(isBulkEmail('LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>', 'New jobs for you')).toBe(true);
+    expect(isBulkEmail('Glassdoor <noreply@glassdoor.com>', 'BNY is hiring')).toBe(true);
+    expect(isBulkEmail('BNY <newsletter@bny.com>', 'Our quarterly update')).toBe(true);
+  });
+
+  it('keeps real application emails, including LinkedIn application updates', () => {
+    expect(isBulkEmail('BNY Talent <bny@myworkday.com>', 'Your offer from BNY')).toBe(false);
+    expect(isBulkEmail('LinkedIn <jobs-noreply@linkedin.com>', 'Your application to Product Manager at Acme')).toBe(false);
+    expect(isBulkEmail('recruiting@acme.com', 'Interview availability')).toBe(false);
   });
 });
